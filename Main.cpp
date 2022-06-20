@@ -2,8 +2,11 @@
 #include <windows.h>
 #include <vector>
 
+CRITICAL_SECTION cs;
+
 long long *workArray;
 long long workArrayLength;
+
 struct MetaThread {
     long long index;
     HANDLE Thread;
@@ -12,6 +15,8 @@ struct MetaThread {
 };
 std::vector<MetaThread> runningThreads;
 long long threadCount;
+
+DWORD WINAPI marker(LPVOID lpParam) {}
 
 int main() {
     SetConsoleOutputCP(CP_UTF8);
@@ -29,6 +34,20 @@ int main() {
 
     std::cout << "Введите количество экземпляров потока marker, которые будут запущены:";
     std::cin >> threadCount;
+
+    InitializeCriticalSection(&cs);
+
+    i = 0;
+    while (i < threadCount) {
+        runningThreads[i].index = i;
+        runningThreads[i].Thread = CreateThread(NULL, 0, marker, (LPVOID) (i), NULL, NULL);
+        runningThreads[i].isPaused = CreateEvent(NULL, TRUE, FALSE, NULL);
+        runningThreads[i].isToBeTerminated = CreateEvent(NULL, TRUE, FALSE, NULL);
+        ++i;
+    }
+
+    DeleteCriticalSection(&cs);
+    delete[] workArray;
 
     return 0;
 }
