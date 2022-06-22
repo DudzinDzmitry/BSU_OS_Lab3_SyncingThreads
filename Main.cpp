@@ -1,34 +1,31 @@
 #include <iostream>
 #include <windows.h>
-#include <vector>
 
 CRITICAL_SECTION cs;
 
 int *workArray;
 int workArrayLength;
 
-struct MetaInfo {
-    int index;
-    HANDLE isPaused;
-    HANDLE isToBeTerminated;
-};
-std::vector<MetaInfo *> threadInfo;
-std::vector<HANDLE> runningThreads;
+HANDLE *threads;
 int threadCount;
 
-HANDLE startEvent;
+HANDLE *waiting;
+HANDLE *terminated;
+
+HANDLE run;
+HANDLE answer;
 
 DWORD WINAPI marker(LPVOID lpParam) {
-    WaitForSingleObject(startEvent, INFINITE);
-    MetaInfo *temp;
-    temp = (MetaInfo *) lpParam;
-    int threadIndex;
-    threadIndex = temp->index;
+    int threadIndex = (long long) lpParam;
     srand(threadIndex + 1);
+
     int markedCount = 0;
-    while (true) {
-        EnterCriticalSection(&cs);
+    while (WaitForSingleObject(terminated[threadIndex], 0) != WAIT_OBJECT_0) {
+        WaitForSingleObject(run, INFINITE);
+
         int index = rand() % workArrayLength;
+
+        EnterCriticalSection(&cs);
         if (workArray[index] == 0) {
             Sleep(5);
             workArray[index] = threadIndex + 1;
@@ -36,24 +33,22 @@ DWORD WINAPI marker(LPVOID lpParam) {
             Sleep(5);
             LeaveCriticalSection(&cs);
         } else {
-            std::cout << "поток с порядковым номером № " << threadIndex + 1 << "пометил " << markedCount
-                      << "элементов, но не смог пометить элемент с индексом" << index << "\n";
-            SetEvent(temp->isPaused);
-            WaitForMultipleObjects(threadCount, &threadInfo[0]->isToBeTerminated, FALSE, INFINITE);
-            if (WaitForSingleObject(temp->isToBeTerminated, 0) == WAIT_OBJECT_0) {
-                int i = 0;
-                while (i < workArrayLength) {
-                    if (workArray[i] == threadIndex + 1)
-                        workArray[i] = 0;
-                    ++i;
-                }
-                runningThreads.erase(runningThreads.begin() + threadIndex - 1);
-                break;
-            } else ResetEvent(temp->isPaused);
             LeaveCriticalSection(&cs);
+            std::cout << "поток с порядковым номером № " << threadIndex + 1 << " пометил " << markedCount
+                      << " элементов, но не смог пометить элемент с индексом " << index << "\n";
+
+            SetEvent(waiting[threadIndex]);
+            WaitForSingleObject(answer, INFINITE);
+
+            ResetEvent(waiting[threadIndex]);
         }
     }
-    return 0;
+    int i = 0;
+    while (i < workArrayLength) {
+        if (workArray[i] == threadIndex + 1) workArray[i] = 0;
+        ++i;
+    }
+    SetEvent(waiting[threadIndex]);
 }
 
 int main() {
@@ -73,35 +68,33 @@ int main() {
     std::cout << "Введите количество экземпляров потока marker, которые будут запущены:";
     std::cin >> threadCount;
 
-    InitializeCriticalSection(&cs);
+    run = CreateEvent(NULL, TRUE, FALSE, NULL);
 
-    startEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-
-    MetaInfo *tempInfo;
-    HANDLE tempHandle;
+    threads = new HANDLE[threadCount];
+    waiting = new HANDLE[threadCount];
+    terminated = new HANDLE[threadCount];
 
     i = 0;
     while (i < threadCount) {
-        tempInfo = new MetaInfo();
-        tempInfo->index = i;
-        tempInfo->isPaused = CreateEvent(NULL, TRUE, FALSE, NULL);
-        tempInfo->isToBeTerminated = CreateEvent(NULL, TRUE, FALSE, NULL);
-        threadInfo.push_back(tempInfo);
-        tempHandle = CreateThread(NULL, 0, marker, (LPVOID) (tempInfo), 0, NULL);
-        runningThreads.push_back(tempHandle);
+        threads[i] = CreateThread(NULL, 0, marker, (LPVOID) i, 0, NULL);
+        waiting[i] = CreateEvent(NULL, TRUE, FALSE, NULL);
+        terminated[i] = CreateEvent(NULL, TRUE, FALSE, NULL);
         ++i;
     }
     std::cout << threadCount << " потока запущены и готовы к работе.\n";
 
+    InitializeCriticalSection(&cs);
 
-    SetEvent(startEvent);
     std::cout << "Сигнал к началу работы подан.\n";
+    SetEvent(run);
 
-    while (threadCount != 0) {
-        std::cout << "Поток main ожидает окончания работы " << threadCount << " потока(-ов).\n";
-        WaitForMultipleObjects(threadCount, &threadInfo[0]->isPaused, TRUE, INFINITE);
+    answer = CreateEvent(NULL, TRUE, FALSE, NULL);
 
-        std::cout << "После окончания работы " << threadCount << " потока(-ов) marker массив имеет вид:\n";
+    int runningThreadCount = threadCount;
+    while (runningThreadCount != 0) {
+        WaitForMultipleObjects(threadCount, waiting, TRUE, INFINITE);
+        ResetEvent(run);
+        std::cout << "После окончания работы " << runningThreadCount << " потока(-ов) marker массив имеет вид:\n";
         i = 0;
         while (i < workArrayLength - 1) {
             std::cout << workArray[i] << " ";
@@ -109,15 +102,17 @@ int main() {
         }
         std::cout << workArray[i] << "\n";
 
-        std::cout << "Введите порядковый номер потока, который завершит свою работу";
-        long long terminationIndex;
+        std::cout << "Введите порядковый номер потока, который завершит свою работу:";
+        int terminationIndex;
         std::cin >> terminationIndex;
 
-        SetEvent(threadInfo[--terminationIndex]->isToBeTerminated);
-        std::cout << "Сигнал к завершению работы потока № " << terminationIndex + 1
-                  << " и продолжению работы всех остальных потоков был подан.\n";
+        std::cout << "Сигнал к завершению работы потока № " << terminationIndex << " был подан.\n";
+        SetEvent(terminated[--terminationIndex]);
+        SetEvent(answer);
 
-        WaitForSingleObject(runningThreads[terminationIndex], INFINITE);
+        WaitForSingleObject(threads[terminationIndex], INFINITE);
+        --runningThreadCount;
+
         std::cout << "После завершения работы потока номер " << terminationIndex + 1 << "массив имеет вид: ";
         i = 0;
         while (i < workArrayLength - 1) {
@@ -125,10 +120,16 @@ int main() {
             ++i;
         }
         std::cout << workArray[i] << "\n";
+        std::cout << "Сигнал к возобновлению работы " << runningThreadCount << " потоков был подан.\n";
+        ResetEvent(answer);
+        SetEvent(run);
     }
 
     DeleteCriticalSection(&cs);
     delete[] workArray;
+    delete[] threads;
+    delete[] waiting;
+    delete[] terminated;
 
     return 0;
 }
